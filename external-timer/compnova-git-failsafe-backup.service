@@ -1,0 +1,22 @@
+[Unit]
+Description=CompNova Path B Fail-Safe Git Mirror Backup to Immutable S3
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Defaults below are overridden by EnvironmentFile when present.
+Environment="S3_BUCKET_URL=s3://compnova-git-immutable-vault"
+Environment="GIT_AUTH_MODE=ssh"
+Environment="GITHUB_REPO_LIST=compnova/sap-server"
+# Out-of-band deploy-key auth on this host (see README "External Timer Setup"):
+#   ssh-keygen -t ed25519 -f /root/.ssh/id_ed25519_compnova_backup -N ""
+#   ssh-keyscan -t ed25519 github.com >> /root/.ssh/known_hosts
+#   # register the .pub as a read-only deploy key for each mirrored repo
+Environment="GIT_SSH_KEY_FILE=/root/.ssh/id_ed25519_compnova_backup"
+Environment="GIT_SSH_KNOWN_HOSTS_FILE=/root/.ssh/known_hosts"
+EnvironmentFile=-/opt/compnova-backup/config/backup.env
+WorkingDirectory=/opt/compnova-backup
+ExecStart=/opt/compnova-backup/scripts/failsafe_mirror_backup.sh
+StandardOutput=journal
+StandardError=journal

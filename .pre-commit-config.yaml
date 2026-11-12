@@ -1,0 +1,19 @@
+# ==============================================================================
+# CompNova Local Secret Checks (Slide 2: $0 Local Secret Scanning)
+# Install with: ./scripts/install_hooks.sh  OR  pre-commit install
+# ==============================================================================
+repos:
+  - repo: local
+    hooks:
+      - id: compnova-secret-scanner
+        name: "CompNova Pre-Commit Secret & Credential Leak Blocker"
+        entry: scripts/pre-commit-secret-scan.sh
+        language: script
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit, pre-push]
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.4
+    hooks:
+      - id: gitleaks

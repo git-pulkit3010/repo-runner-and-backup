@@ -1,0 +1,7 @@
+# ==============================================================================
+# CompNova Repository Controls - Required PR Reviews via GitHub Team
+# Slide 2: Branch Protection - Required PR reviews via GitHub Team
+# ==============================================================================
+*       @compnova/core-reviewers
+/.github/ @compnova/core-reviewers @compnova/security-admins
+/scripts/ @compnova/core-reviewers @compnova/security-admins

@@ -1,0 +1,61 @@
+name: "PR Security & Compliance Controls"
+
+on:
+  pull_request:
+    branches:
+      - main
+      - master
+      - production
+
+# ==============================================================================
+# GLOBAL VARIABLES
+# ==============================================================================
+env:
+  S3_BUCKET_URL: "s3://compnova-git-immutable-vault"
+  GITLEAKS_VERSION: "8.18.4"
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  secret-and-policy-check:
+    name: "Block Credential Leaks & Verify Compliance"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR Branch with History
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Pinned gitleaks Binary (non-fatal, offline-safe)
+        env:
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
+        run: |
+          set -euo pipefail
+          GL_DIR="${RUNNER_TEMP:-/tmp}/gitleaks-bin"
+          mkdir -p "${GL_DIR}"
+          GL_URL="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          if curl -fsSL --retry 2 -o "${GL_DIR}/gitleaks.tar.gz" "${GL_URL}" \
+             && tar -xzf "${GL_DIR}/gitleaks.tar.gz" -C "${GL_DIR}" gitleaks \
+             && chmod +x "${GL_DIR}/gitleaks"; then
+            echo "${GL_DIR}" >> "${GITHUB_PATH}"
+            echo "gitleaks v${GITLEAKS_VERSION} installed (pinned to .pre-commit-config.yaml rev)."
+          else
+            rm -rf "${GL_DIR}"
+            echo "::warning::gitleaks download failed (offline runner?) - built-in python fallback scanner will be used."
+          fi
+
+      # BLOCKING control: a leak must never merge. Do not add continue-on-error.
+      # The scanner resolves the diff range from the PR context (or scans full
+      # history if no base is available), so commits deep in the PR are covered.
+      - name: Run Local Secret Scanner in CI Mode
+        env:
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
+          # Scan range for the whole PR (all commits in it, not just the net
+          # diff) so a leak introduced in an earlier commit of a multi-commit
+          # PR is still caught.
+          GITHUB_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          chmod +x scripts/pre-commit-secret-scan.sh
+          ./scripts/pre-commit-secret-scan.sh --ci

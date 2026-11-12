@@ -1,0 +1,77 @@
+# ==============================================================================
+# Path B - MANUAL FALLBACK ONLY.
+#
+# The SCHEDULED Path B runner is the EXTERNAL timer in `external-timer/`
+# (compnova-git-failsafe-backup.timer or compnova-git-failsafe.cron), which
+# runs OUTSIDE this repository on a dedicated backup host. That is a hard
+# architectural requirement: the fail-safe backup must survive deletion or
+# corruption of this repo (failure isolation).
+#
+# Do NOT re-add a `schedule:` trigger to this workflow:
+#   * it would double-fire at 02:00 UTC against the external timer, writing
+#     redundant .tar.gz/.bundle objects into the same S3 date partitions, and
+#   * an in-repo schedule dies with the repo it is supposed to protect.
+# This workflow_dispatch file stays only as an explicitly manual fallback
+# (e.g. after an incident when the external host is unavailable).
+# ==============================================================================
+name: "Path B - Fail-Safe Mirror Pull to Locked S3 Storage (Manual Fallback)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_repo_url:
+        description: "Optional override repository URL to mirror"
+        required: false
+        default: ""
+
+# ==============================================================================
+# GLOBAL VARIABLES (Edit S3_BUCKET_URL here for Path B Fail-Safe Runner)
+# ==============================================================================
+env:
+  S3_BUCKET_URL: "s3://compnova-git-immutable-vault"
+  S3_FAILSAFE_PREFIX: "path-b-failsafe-mirror"
+  AWS_REGION: "us-east-1"
+  SSE_ALGORITHM: "AES256"
+  ENABLE_OBJECT_LOCK: "true"
+  OBJECT_LOCK_MODE: "COMPLIANCE"
+  OBJECT_LOCK_RETENTION_DAYS: "365"
+
+# Top-level default: read-only. The AWS-facing job below adds id-token: write
+# for OIDC role federation (passwordless) only where it is actually used.
+permissions:
+  contents: read
+
+jobs:
+  daily-mirror-backup:
+    name: "02 / Path B (Manual Fallback): Mirror Pull All Branches & Tags to Locked S3 Vault"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout Backup Runner Scripts
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials (OIDC role)
+        if: ${{ secrets.AWS_ROLE_ARN != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure AWS Credentials (static key fallback)
+        if: ${{ secrets.AWS_ROLE_ARN == '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Execute Full Mirror Clone & Immutable S3 Upload
+        env:
+          GITHUB_REPO_URL: ${{ github.event.inputs.target_repo_url != '' && github.event.inputs.target_repo_url || format('https://x-access-token:{0}@github.com/{1}.git', secrets.BACKUP_PAT || secrets.GITHUB_TOKEN, github.repository) }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          BACKUP_ENCRYPTION_PASSPHRASE: ${{ secrets.BACKUP_ENCRYPTION_PASSPHRASE }}
+        run: |
+          chmod +x scripts/failsafe_mirror_backup.sh
+          ./scripts/failsafe_mirror_backup.sh

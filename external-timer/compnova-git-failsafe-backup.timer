@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily External Timer for CompNova Path B Fail-Safe Git Backup
+
+[Timer]
+OnCalendar=*-*-* 02:00:00 UTC
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

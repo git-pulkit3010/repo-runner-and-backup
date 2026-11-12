@@ -1,0 +1,18 @@
+# ==============================================================================
+# CompNova Path B: External Daily Schedule Cron Entry (Runs outside repository)
+# Global S3_BUCKET_URL is defined at the top so it is easily editable.
+#
+# One-time host setup for out-of-band Git auth (GIT_AUTH_MODE=ssh default):
+#   ssh-keygen -t ed25519 -f /root/.ssh/id_ed25519_compnova_backup -N ""
+#   ssh-keyscan -t ed25519 github.com >> /root/.ssh/known_hosts
+#   # register the .pub as a read-only deploy key for each repo in
+#   # GITHUB_REPO_LIST (set in /opt/compnova-backup/config/backup.env;
+#   # space/comma separated - scale Path B by adding entries, no code change)
+# Set GIT_AUTH_MODE="https" + GITHUB_BACKUP_PAT here instead to use a PAT.
+# ==============================================================================
+S3_BUCKET_URL="s3://compnova-git-immutable-vault"
+AWS_REGION="us-east-1"
+GIT_AUTH_MODE="ssh"
+GITHUB_REPO_LIST="compnova/sap-server"
+
+0 2 * * * root S3_BUCKET_URL="${S3_BUCKET_URL}" AWS_REGION="${AWS_REGION}" GIT_AUTH_MODE="${GIT_AUTH_MODE}" GITHUB_REPO_LIST="${GITHUB_REPO_LIST}" /opt/compnova-backup/scripts/failsafe_mirror_backup.sh >> /var/log/compnova-git-backup.log 2>&1

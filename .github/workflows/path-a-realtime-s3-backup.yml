@@ -1,0 +1,144 @@
+name: "Path A - Real-Time S3 Full-History Backup & Compliance Gate"
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - production
+  workflow_dispatch:
+    inputs:
+      verify_compliance:
+        description: "Run GitHub repository & org security compliance checks"
+        required: false
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+# ==============================================================================
+# GLOBAL VARIABLES (Edit S3_BUCKET_URL here for Path A Real-Time Workflow)
+# ==============================================================================
+env:
+  S3_BUCKET_URL: "s3://compnova-git-immutable-vault"
+  S3_REALTIME_PREFIX: "path-a-realtime"
+  AWS_REGION: "us-east-1"
+  SSE_ALGORITHM: "AES256"
+  ENABLE_OBJECT_LOCK: "true"
+  OBJECT_LOCK_MODE: "COMPLIANCE"
+  OBJECT_LOCK_RETENTION_DAYS: "90"
+  REQUIRED_TEAM_SLUG: "core-reviewers"
+  GITLEAKS_VERSION: "8.18.4"
+
+# Top-level default: read-only. The AWS-facing job below adds id-token: write
+# for OIDC role federation (passwordless) only where it is actually used.
+permissions:
+  contents: read
+
+concurrency:
+  group: realtime-s3-backup-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Single job (was two): the gate job re-checked-out full history a second
+  # time for no benefit. The blocking merge gate lives in
+  # pr-security-compliance.yml + branch protection, so the gate steps here are
+  # advisory (non-fatal): a clean commit must ALWAYS reach the immutable vault
+  # even when the GitHub API is rate-limited or the scanner hiccups.
+  realtime-s3-archive:
+    name: "01 / Path A: Secret & Compliance Gate (advisory) + Full-History Bundle to Locked S3"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout Full Git History (All Branches & Tags)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Install Pinned gitleaks Binary (non-fatal, offline-safe)
+        env:
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
+        run: |
+          set -euo pipefail
+          GL_DIR="${RUNNER_TEMP:-/tmp}/gitleaks-bin"
+          mkdir -p "${GL_DIR}"
+          GL_URL="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          if curl -fsSL --retry 2 -o "${GL_DIR}/gitleaks.tar.gz" "${GL_URL}" \
+             && tar -xzf "${GL_DIR}/gitleaks.tar.gz" -C "${GL_DIR}" gitleaks \
+             && chmod +x "${GL_DIR}/gitleaks"; then
+            echo "${GL_DIR}" >> "${GITHUB_PATH}"
+            echo "gitleaks v${GITLEAKS_VERSION} installed; scanner will use it (python fallback still runs after)."
+          else
+            rm -rf "${GL_DIR}"
+            echo "::warning::gitleaks download failed (offline runner?) - built-in python fallback scanner will be used."
+          fi
+
+      - name: Run Secret Leak Compliance Scanner (advisory - backup must not be blocked)
+        id: secret_scan
+        continue-on-error: true
+        env:
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
+          # Scan range for this push (all commits in it). Falls back to a full
+          # history scan for a branch's first push (before = all zeros).
+          GITHUB_EVENT_BEFORE: ${{ github.event.before }}
+        run: |
+          chmod +x scripts/pre-commit-secret-scan.sh
+          if ! ./scripts/pre-commit-secret-scan.sh --ci; then
+            echo "::warning::CompNova secret scan reported findings on ${GITHUB_REF_NAME} @ ${GITHUB_SHA}. The blocking control is pr-security-compliance.yml + branch protection; this push already merged, so the backup continues - security admins MUST triage the scanner log in this job."
+            {
+              echo "## :warning: Path A secret scan reported findings"
+              echo ""
+              echo "- Branch: \`${GITHUB_REF_NAME}\` · Commit: \`${GITHUB_SHA}\`"
+              echo "- Outcome: NON-BLOCKING by design (disaster-recovery priority); full backup continued."
+              echo "- Action: security admins must triage the scanner output in this job's log."
+            } >> "${GITHUB_STEP_SUMMARY}"
+            exit 1
+          fi
+
+      - name: Verify Repository Visibility, 2FA & Branch Protection Compliance (advisory)
+        id: compliance_audit
+        if: ${{ github.event.inputs.verify_compliance != 'false' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.COMPLIANCE_ADMIN_TOKEN || secrets.GITHUB_TOKEN }}
+          GITHUB_REPO: ${{ github.repository }}
+          PROTECTED_BRANCH: ${{ github.ref_name }}
+        run: |
+          chmod +x scripts/verify_repo_compliance.sh
+          if ! ./scripts/verify_repo_compliance.sh --audit-only; then
+            echo "::warning::Compliance audit FAILED for ${GITHUB_REF_NAME} @ ${GITHUB_SHA} (e.g. visibility or API/rate-limit issue). Backup continues - a clean commit must always reach the immutable vault."
+            {
+              echo "## :warning: Path A compliance audit FAILED"
+              echo ""
+              echo "- Branch: \`${GITHUB_REF_NAME}\` · Commit: \`${GITHUB_SHA}\`"
+              echo "- Outcome: NON-BLOCKING by design; full backup continued."
+              echo "- Action: security admins must review the audit output in this job's log."
+            } >> "${GITHUB_STEP_SUMMARY}"
+            exit 1
+          fi
+
+      - name: Configure AWS Credentials (OIDC role)
+        if: ${{ secrets.AWS_ROLE_ARN != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure AWS Credentials (static key fallback)
+        if: ${{ secrets.AWS_ROLE_ARN == '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Bundle Full Git History & Upload Encrypted Archive to S3
+        env:
+          BACKUP_ENCRYPTION_PASSPHRASE: ${{ secrets.BACKUP_ENCRYPTION_PASSPHRASE }}
+        run: |
+          chmod +x scripts/realtime_bundle_backup.sh
+          ./scripts/realtime_bundle_backup.sh
